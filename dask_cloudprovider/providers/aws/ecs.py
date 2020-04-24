@@ -385,7 +385,8 @@ class Worker(Task):
                 "{}GB".format(int(self._mem / 1024)),
                 "--death-timeout",
                 "60",
-            ] + (list() if not extra_args else extra_args)
+            ]
+            + (list() if not extra_args else extra_args)
         }
 
 
@@ -1026,7 +1027,12 @@ class ECSCluster(SpecCluster):
                             "dask-scheduler",
                             "--idle-timeout",
                             self._scheduler_timeout,
-                        ] + (list() if not self._scheduler_extra_args else self._scheduler_extra_args),
+                        ]
+                        + (
+                            list()
+                            if not self._scheduler_extra_args
+                            else self._scheduler_extra_args
+                        ),
                         "logConfiguration": {
                             "logDriver": "awslogs",
                             "options": {
@@ -1082,7 +1088,12 @@ class ECSCluster(SpecCluster):
                             "{}MB".format(int(self._worker_mem)),
                             "--death-timeout",
                             "60",
-                        ] + (list() if not self._worker_extra_args else self._worker_extra_args),
+                        ]
+                        + (
+                            list()
+                            if not self._worker_extra_args
+                            else self._worker_extra_args
+                        ),
                         "logConfiguration": {
                             "logDriver": "awslogs",
                             "options": {
