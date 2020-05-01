@@ -179,7 +179,7 @@ class Task:
                             self.external_address = address.replace(
                                 self.private_ip, self.public_ip
                             )
-                        logger.debug("%s", line)
+                        logger.info("%s", line)  # JJS
                         self.address = address
                         return
             else:
@@ -202,6 +202,7 @@ class Task:
                     else {}
                 )  # Tags are only supported if you opt into long arn format so we need to check for that
                 async with self._client("ecs") as ecs:
+                    logger.info("Calling ecs.run_task():\n{}".format(self.task_definition_arn))  # JJS
                     response = await ecs.run_task(
                         cluster=self.cluster_arn,
                         taskDefinition=self.task_definition_arn,
@@ -592,6 +593,7 @@ class ECSCluster(SpecCluster):
         use_private_ip=False,
         **kwargs
     ):
+        logger.info("ECSCluster({})".format(kwargs))  # JJS
         self._fargate_scheduler = fargate_scheduler
         self._fargate_workers = fargate_workers
         self.image = image
@@ -797,6 +799,8 @@ class ECSCluster(SpecCluster):
             "extra_args": self._worker_extra_args,
             **options,
         }
+        # await logger.info("scheduler_options:\n{}".format(scheduler_options))  # JJS
+        # await logger.info("worker_options:\n{}".format(worker_options))  # JJS
 
         self.scheduler_spec = {"cls": Scheduler, "options": scheduler_options}
         self.new_spec = {"cls": Worker, "options": worker_options}
@@ -1055,6 +1059,7 @@ class ECSCluster(SpecCluster):
 
     async def _delete_scheduler_task_definition_arn(self):
         async with self._client("ecs") as ecs:
+            logger.info("ecs.deregister_task_definition({})".format(self.scheduler_task_definition_arn))  # JJS
             await ecs.deregister_task_definition(
                 taskDefinition=self.scheduler_task_definition_arn
             )
@@ -1116,6 +1121,7 @@ class ECSCluster(SpecCluster):
 
     async def _delete_worker_task_definition_arn(self):
         async with self._client("ecs") as ecs:
+            logger.info("ecs.deregister_task_definition({})".format(self.worker_task_definition_arn))  # JJS
             await ecs.deregister_task_definition(
                 taskDefinition=self.worker_task_definition_arn
             )
@@ -1206,6 +1212,7 @@ async def _cleanup_stale_resources():
                     task_definition_cluster is None
                     or task_definition_cluster not in active_clusters
                 ):
+                    logger.info("ecs.deregister_task_definition({})".format(task_definition_arn))  # JJS
                     await ecs.deregister_task_definition(
                         taskDefinition=task_definition_arn
                     )
