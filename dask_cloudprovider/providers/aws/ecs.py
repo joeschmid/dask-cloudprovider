@@ -77,8 +77,13 @@ class Task:
     name: str (optional)
         Name for the task. Currently used for the --namecommand line argument to dask-worker.
 
-    use_private_ip: bool (optional)
-        Whether to use a private IP (if True) or public IP (if False). Default is False.
+    platform_version: str (optional)
+        Version of the AWS Fargate platform to use, e.g. "1.4.0" or "LATEST". This
+        setting has no effect for the EC2 launch type.
+
+    fargate_use_private_ip: bool (optional)
+        Whether to use a private IP (if True) or public IP (if False) with Fargate.
+        Defaults to False, i.e. public IP.
 
     kwargs:
         Any additional kwargs which may need to be stored for later use.
@@ -103,7 +108,8 @@ class Task:
         tags,
         find_address_timeout,
         name=None,
-        use_private_ip=False,
+        platform_version=None,
+        fargate_use_private_ip=False,
         **kwargs
     ):
         self.lock = asyncio.Lock()
@@ -128,7 +134,8 @@ class Task:
         self.environment = environment or {}
         self.tags = tags
         self._find_address_timeout = find_address_timeout
-        self._use_private_ip = use_private_ip
+        self.platform_version = platform_version
+        self._fargate_use_private_ip = fargate_use_private_ip
         self.kwargs = kwargs
         self.status = "created"
 
@@ -144,7 +151,7 @@ class Task:
 
     @property
     def _use_public_ip(self):
-        return self.fargate and not self._use_private_ip
+        return self.fargate and not self._fargate_use_private_ip
 
     async def _is_long_arn_format_enabled(self):
         async with self._client("ecs") as ecs:
@@ -201,6 +208,8 @@ class Task:
                     if await self._is_long_arn_format_enabled()
                     else {}
                 )  # Tags are only supported if you opt into long arn format so we need to check for that
+                if self.platform_version and self.fargate:
+                    kwargs["platformVersion"] = self.platform_version
                 async with self._client("ecs") as ecs:
                     response = await ecs.run_task(
                         cluster=self.cluster_arn,
@@ -545,9 +554,14 @@ class ECSCluster(SpecCluster):
         and this operation takes a while.
 
         Default ``False``.
-    use_private_ip: bool (optional)
-        If True, use a private IP, if False use public IPs.
+    platform_version: str (optional)
+        Version of the AWS Fargate platform to use, e.g. "1.4.0" or "LATEST". This
+        setting has no effect for the EC2 launch type.
 
+        Defaults to ``None``
+    fargate_use_private_ip: bool (optional)
+        Whether to use a private IP (if True) or public IP (if False) with Fargate.
+        
         Default ``False``.
     **kwargs: dict
         Additional keyword arguments to pass to ``SpecCluster``.
@@ -589,7 +603,8 @@ class ECSCluster(SpecCluster):
         aws_access_key_id=None,
         aws_secret_access_key=None,
         region_name=None,
-        use_private_ip=False,
+        platform_version=None,
+        fargate_use_private_ip=False,
         **kwargs
     ):
         self._fargate_scheduler = fargate_scheduler
@@ -602,7 +617,6 @@ class ECSCluster(SpecCluster):
         self._worker_cpu = worker_cpu
         self._worker_mem = worker_mem
         self._worker_gpu = worker_gpu
-        self._worker_extra_args = worker_extra_args
         self._worker_extra_args = worker_extra_args
         self._n_workers = n_workers
         self.cluster_arn = cluster_arn
@@ -621,10 +635,11 @@ class ECSCluster(SpecCluster):
         self._tags = tags
         self._find_address_timeout = find_address_timeout
         self._skip_cleanup = skip_cleanup
-        self._use_private_ip = use_private_ip
+        self._fargate_use_private_ip = fargate_use_private_ip
         self._aws_access_key_id = aws_access_key_id
         self._aws_secret_access_key = aws_secret_access_key
         self._region_name = region_name
+        self._platform_version = platform_version
         self._lock = asyncio.Lock()
         self.session = aiobotocore.get_session()
         super().__init__(**kwargs)
@@ -688,7 +703,10 @@ class ECSCluster(SpecCluster):
             self._scheduler_timeout = self.config.get("scheduler_timeout")
 
         if self._scheduler_extra_args is None:
-            self._scheduler_extra_args = self.config.get("scheduler_extra_args")
+            comma_separated_args = self.config.get("scheduler_extra_args")
+            self._scheduler_extra_args = (
+                comma_separated_args.split(",") if comma_separated_args else None
+            )
 
         if self._worker_cpu is None:
             self._worker_cpu = self.config.get("worker_cpu")
@@ -697,13 +715,19 @@ class ECSCluster(SpecCluster):
             self._worker_mem = self.config.get("worker_mem")
 
         if self._worker_extra_args is None:
-            self._worker_extra_args = self.config.get("worker_extra_args")
+            comma_separated_args = self.config.get("worker_extra_args")
+            self._worker_extra_args = (
+                comma_separated_args.split(",") if comma_separated_args else None
+            )
 
         if self._n_workers is None:
             self._n_workers = self.config.get("n_workers")
 
         if self._cluster_name_template is None:
             self._cluster_name_template = self.config.get("cluster_name_template")
+
+        if self._platform_version is None:
+            self._platform_version = self.config.get("platform_version")
 
         if self.cluster_arn is None:
             self.cluster_arn = (
@@ -781,7 +805,8 @@ class ECSCluster(SpecCluster):
             "environment": self._environment,
             "tags": self.tags,
             "find_address_timeout": self._find_address_timeout,
-            "use_private_ip": self._use_private_ip,
+            "platform_version": self._platform_version,
+            "fargate_use_private_ip": self._fargate_use_private_ip,
         }
         scheduler_options = {
             "task_definition_arn": self.scheduler_task_definition_arn,
@@ -1206,9 +1231,10 @@ async def _cleanup_stale_resources():
                     task_definition_cluster is None
                     or task_definition_cluster not in active_clusters
                 ):
-                    await ecs.deregister_task_definition(
-                        taskDefinition=task_definition_arn
-                    )
+                    if False:  # JJS hard code for now, but make a flag
+                        await ecs.deregister_task_definition(
+                            taskDefinition=task_definition_arn
+                        )
 
     # Clean up security groups (with no active clusters)
     async with session.create_client("ec2") as ec2:
