@@ -1231,10 +1231,9 @@ async def _cleanup_stale_resources():
                     task_definition_cluster is None
                     or task_definition_cluster not in active_clusters
                 ):
-                    if False:  # JJS hard code for now, but make a flag
-                        await ecs.deregister_task_definition(
-                            taskDefinition=task_definition_arn
-                        )
+                    await ecs.deregister_task_definition(
+                        taskDefinition=task_definition_arn
+                    )
 
     # Clean up security groups (with no active clusters)
     async with session.create_client("ec2") as ec2:
