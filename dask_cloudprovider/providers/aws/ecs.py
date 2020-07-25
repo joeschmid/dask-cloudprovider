@@ -83,6 +83,10 @@ class Task:
         Whether to use a private IP (if True) or public IP (if False) with Fargate.
         Defaults to False, i.e. public IP.
 
+    capacity_provider_strategy: list (optional)
+        List of capacity providers with weight and base values to use with the
+        AWS ECS run_task function, as documented here: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ecs.html#ECS.Client.run_task
+
     kwargs:
         Any additional kwargs which may need to be stored for later use.
 
@@ -108,6 +112,7 @@ class Task:
         name=None,
         platform_version=None,
         fargate_use_private_ip=False,
+        capacity_provider_strategy=None,
         **kwargs
     ):
         self.lock = asyncio.Lock()
@@ -134,8 +139,14 @@ class Task:
         self._find_address_timeout = find_address_timeout
         self.platform_version = platform_version
         self._fargate_use_private_ip = fargate_use_private_ip
+        self._capacity_provider_strategy = capacity_provider_strategy
         self.kwargs = kwargs
         self.status = "created"
+        logger.info(
+            "Task constructor: self._capacity_provider_strategy: {}".format(
+                self._capacity_provider_strategy
+            )
+        )
 
     def __await__(self):
         async def _():
@@ -208,34 +219,46 @@ class Task:
                 )  # Tags are only supported if you opt into long arn format so we need to check for that
                 if self.platform_version and self.fargate:
                     kwargs["platformVersion"] = self.platform_version
-                async with self._client("ecs") as ecs:
-                    response = await ecs.run_task(
-                        cluster=self.cluster_arn,
-                        taskDefinition=self.task_definition_arn,
-                        overrides={
-                            "containerOverrides": [
-                                {
-                                    "name": "dask-{}".format(self.task_type),
-                                    "environment": dict_to_aws(
-                                        self.environment, key_string="name"
-                                    ),
-                                    **self._overrides,
-                                }
-                            ]
-                        },
-                        count=1,
-                        launchType="FARGATE" if self.fargate else "EC2",
-                        networkConfiguration={
-                            "awsvpcConfiguration": {
-                                "subnets": self._vpc_subnets,
-                                "securityGroups": self._security_groups,
-                                "assignPublicIp": "ENABLED"
-                                if self._use_public_ip
-                                else "DISABLED",
+                run_task_kwargs = {
+                    "cluster": self.cluster_arn,
+                    "taskDefinition": self.task_definition_arn,
+                    "overrides": {
+                        "containerOverrides": [
+                            {
+                                "name": "dask-{}".format(self.task_type),
+                                "environment": dict_to_aws(
+                                    self.environment, key_string="name"
+                                ),
+                                **self._overrides,
                             }
-                        },
-                        **kwargs
-                    )
+                        ]
+                    },
+                    "count": 1,
+                    "networkConfiguration": {
+                        "awsvpcConfiguration": {
+                            "subnets": self._vpc_subnets,
+                            "securityGroups": self._security_groups,
+                            "assignPublicIp": "ENABLED"
+                            if self._use_public_ip
+                            else "DISABLED",
+                        }
+                    },
+                    **kwargs,
+                }
+                if self._capacity_provider_strategy:
+                    if self._capacity_provider_strategy != "DEFAULT":
+                        run_task_kwargs[
+                            "capacityProviderStrategy"
+                        ] = self._capacity_provider_strategy
+                else:
+                    run_task_kwargs["launchType"] = "FARGATE" if self.fargate else "EC2"
+                if hasattr(self, "_cpu"):
+                    run_task_kwargs["overrides"]["cpu"] = str(self._cpu)
+                if hasattr(self, "_mem"):
+                    run_task_kwargs["overrides"]["memory"] = str(self._mem)
+                # logger.info("run_task_kwargs: {}".format(run_task_kwargs))
+                async with self._client("ecs") as ecs:
+                    response = await ecs.run_task(**run_task_kwargs)
 
                 if not response.get("tasks"):
                     raise RuntimeError(response)  # print entire response
@@ -372,6 +395,7 @@ class Worker(Task):
         mem: int,
         gpu: int,
         extra_args: List[str],
+        worker_type: str = "default",
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -393,8 +417,12 @@ class Worker(Task):
                 "--death-timeout",
                 "60",
             ]
-            + (list() if not extra_args else extra_args)
+            + (list() if not extra_args else extra_args),
+            "cpu": self._cpu,
+            "memory": self._mem,
+            "memoryReservation": self._mem,
         }
+        self._worker_type = worker_type
 
 
 class ECSCluster(SpecCluster):
@@ -456,6 +484,24 @@ class ECSCluster(SpecCluster):
         Defaults to `None`, no extra command line arguments.
     n_workers: int (optional)
         Number of workers to start on cluster creation.
+
+        Defaults to ``None``.
+    additional_worker_types: List[str] (optional)
+        Allows for heterogeneous workers, e.g. mixing GPU and non-GPU workers, higher memory workers, etc.
+
+        For each <worker_type> string in this list, the following kwargs will be used to build the
+        specification of the workers. See `SpecCluster` in the Dask distributed project for more details:
+            <worker_type>_worker_cpu
+            <worker_type>_worker_mem
+            <worker_type>_worker_gpu
+            <worker_type>_worker_extra_args
+            <worker_type>_n_workers
+            <worker_type>_capacity_provider_strategy
+
+
+        A common pattern with this option is to specify different Dask worker resources (as documented here:
+        https://distributed.dask.org/en/latest/resources.html) for the different worker types so that tasks
+        can be allocated to workers with appropriate resources, e.g. GPU.
 
         Defaults to ``None``.
     cluster_arn: str (optional if fargate is true)
@@ -592,11 +638,14 @@ class ECSCluster(SpecCluster):
         scheduler_mem=None,
         scheduler_timeout=None,
         scheduler_extra_args=None,
+        scheduler_capacity_provider_strategy=None,
         worker_cpu=None,
         worker_mem=None,
         worker_gpu=None,
         worker_extra_args=None,
         n_workers=None,
+        worker_capacity_provider_strategy=None,
+        additional_worker_types=None,
         cluster_arn=None,
         cluster_name_template=None,
         execution_role_arn=None,
@@ -629,11 +678,16 @@ class ECSCluster(SpecCluster):
         self._scheduler_mem = scheduler_mem
         self._scheduler_timeout = scheduler_timeout
         self._scheduler_extra_args = scheduler_extra_args
+        self._scheduler_capacity_provider_strategy = (
+            scheduler_capacity_provider_strategy
+        )
         self._worker_cpu = worker_cpu
         self._worker_mem = worker_mem
         self._worker_gpu = worker_gpu
         self._worker_extra_args = worker_extra_args
         self._n_workers = n_workers
+        self._worker_capacity_provider_strategy = worker_capacity_provider_strategy
+        self._additional_worker_types = additional_worker_types
         self.cluster_arn = cluster_arn
         self.cluster_name = None
         self._cluster_name_template = cluster_name_template
@@ -654,12 +708,56 @@ class ECSCluster(SpecCluster):
         self._mount_points = mount_points
         self._volumes = volumes
         self._mount_volumes_on_scheduler = mount_volumes_on_scheduler
+        self._kwargs = kwargs
         self._aws_access_key_id = aws_access_key_id
         self._aws_secret_access_key = aws_secret_access_key
         self._region_name = region_name
         self._platform_version = platform_version
         self._lock = asyncio.Lock()
         self.session = aiobotocore.get_session()
+        for worker_type in self._additional_worker_types or []:
+            logger.info(
+                "Found self._additional_worker_types: {}".format(
+                    self._additional_worker_types
+                )
+            )
+            logger.info("Found kwargs: {}".format(kwargs))
+            if "{}_worker_cpu".format(worker_type) in kwargs:
+                setattr(
+                    self,
+                    "_{}_worker_cpu".format(worker_type),
+                    kwargs.pop("{}_worker_cpu".format(worker_type)),
+                )
+            if "{}_worker_mem".format(worker_type) in kwargs:
+                setattr(
+                    self,
+                    "_{}_worker_mem".format(worker_type),
+                    kwargs.pop("{}_worker_mem".format(worker_type)),
+                )
+            if "{}_worker_gpu".format(worker_type) in kwargs:
+                setattr(
+                    self,
+                    "_{}_worker_gpu".format(worker_type),
+                    kwargs.pop("{}_worker_gpu".format(worker_type)),
+                )
+            if "{}_worker_extra_args".format(worker_type) in kwargs:
+                setattr(
+                    self,
+                    "_{}_worker_extra_args".format(worker_type),
+                    kwargs.pop("{}_worker_extra_args".format(worker_type)),
+                )
+            if "{}_n_workers".format(worker_type) in kwargs:
+                setattr(
+                    self,
+                    "_{}_n_workers".format(worker_type),
+                    kwargs.pop("{}_n_workers".format(worker_type)),
+                )
+            if "{}_capacity_provider_strategy".format(worker_type) in kwargs:
+                setattr(
+                    self,
+                    "_{}_capacity_provider_strategy".format(worker_type),
+                    kwargs.pop("{}_capacity_provider_strategy".format(worker_type)),
+                )
         super().__init__(**kwargs)
 
     def _client(self, name: str):
@@ -829,6 +927,7 @@ class ECSCluster(SpecCluster):
         scheduler_options = {
             "task_definition_arn": self.scheduler_task_definition_arn,
             "fargate": self._fargate_scheduler,
+            "capacity_provider_strategy": self._scheduler_capacity_provider_strategy,
             **options,
         }
         worker_options = {
@@ -838,12 +937,60 @@ class ECSCluster(SpecCluster):
             "mem": self._worker_mem,
             "gpu": self._worker_gpu,
             "extra_args": self._worker_extra_args,
+            "capacity_provider_strategy": self._worker_capacity_provider_strategy,
             **options,
         }
 
         self.scheduler_spec = {"cls": Scheduler, "options": scheduler_options}
         self.new_spec = {"cls": Worker, "options": worker_options}
         self.worker_spec = {i: self.new_spec for i in range(self._n_workers)}
+
+        logger.info("self.worker_spec.keys(): {}".format(self.worker_spec.keys()))
+
+        for worker_type in self._additional_worker_types or []:
+            worker_type_options = {
+                "task_definition_arn": self.worker_task_definition_arn,
+                "fargate": self._fargate_workers,
+                "cpu": getattr(
+                    self, "_{}_worker_cpu".format(worker_type), self._worker_cpu
+                ),
+                "mem": getattr(
+                    self, "_{}_worker_mem".format(worker_type), self._worker_mem
+                ),
+                "gpu": getattr(
+                    self, "_{}_worker_gpu".format(worker_type), self._worker_gpu
+                ),
+                "extra_args": getattr(
+                    self,
+                    "_{}_worker_extra_args".format(worker_type),
+                    self._worker_extra_args,
+                ),
+                "capacity_provider_strategy": getattr(
+                    self,
+                    "_{}_capacity_provider_strategy".format(worker_type),
+                    self._worker_capacity_provider_strategy,
+                ),
+                **options,
+            }
+            # logger.info("worker_type_options[{}]={}".format(worker_type, worker_type_options))
+
+            type_n_workers = getattr(self, "_{}_n_workers".format(worker_type), 1)
+            logger.info("type_n_workers: {}".format(type_n_workers))
+            type_new_spec = {"cls": Worker, "options": worker_type_options}
+            spec_entries = len(self.worker_spec)
+            for i in range(spec_entries, spec_entries + type_n_workers):
+                self.worker_spec[i] = type_new_spec
+
+        for k, v in self.worker_spec.items():
+            logger.info("worker_spec[{}][{}]: {}".format(k, "cpu", v["options"]["cpu"]))
+            logger.info("worker_spec[{}][{}]: {}".format(k, "mem", v["options"]["mem"]))
+            logger.info("worker_spec[{}][{}]: {}".format(k, "gpu", v["options"]["gpu"]))
+            logger.info(
+                "worker_spec[{}][{}]: {}".format(
+                    k, "extra_args", v["options"]["extra_args"]
+                )
+            )
+        logger.info("self.worker_spec.keys(): {}".format(self.worker_spec.keys()))
 
         with warn_on_duration(
             "10s",
