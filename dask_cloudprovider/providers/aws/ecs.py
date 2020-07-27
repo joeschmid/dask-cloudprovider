@@ -461,6 +461,11 @@ class ECSCluster(SpecCluster):
         Any extra command line arguments to pass to dask-scheduler, e.g. ``["--tls-cert", "/path/to/cert.pem"]``
 
         Defaults to `None`, no extra command line arguments.
+    scheduler_capacity_provider_strategy: list (optional)
+        List of capacity providers for the Dask scheduler with weight and base values to use with the
+        AWS ECS run_task function, as documented here: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ecs.html#ECS.Client.run_task
+
+        Defaults to ``None``
     worker_cpu: int (optional)
         The amount of CPU to request for worker tasks in milli-cpu (1/1024).
 
@@ -486,6 +491,11 @@ class ECSCluster(SpecCluster):
         Number of workers to start on cluster creation.
 
         Defaults to ``None``.
+    worker_capacity_provider_strategy: list (optional)
+        List of capacity providers for Dask workers with weight and base values to use with the
+        AWS ECS run_task function, as documented here: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ecs.html#ECS.Client.run_task
+
+        Defaults to ``None``
     additional_worker_types: List[str] (optional)
         Allows for heterogeneous workers, e.g. mixing GPU and non-GPU workers, higher memory workers, etc.
 
@@ -498,6 +508,15 @@ class ECSCluster(SpecCluster):
             <worker_type>_n_workers
             <worker_type>_capacity_provider_strategy
 
+        Example kwargs:
+            additional_worker_types=['highmem', 'gpu'],
+            highmem_worker_mem=8192,
+            highmem_worker_mem=65536,
+            highmem_worker_extra_args=["--resources", "HIGHMEM=65536"],
+            highmem_n_workers=10,
+            gpu_worker_gpu=4,
+            highmem_worker_extra_args=["--resources", "GPU=4"],
+            gpu_n_workers=2,
 
         A common pattern with this option is to specify different Dask worker resources (as documented here:
         https://distributed.dask.org/en/latest/resources.html) for the different worker types so that tasks
@@ -708,7 +727,6 @@ class ECSCluster(SpecCluster):
         self._mount_points = mount_points
         self._volumes = volumes
         self._mount_volumes_on_scheduler = mount_volumes_on_scheduler
-        self._kwargs = kwargs
         self._aws_access_key_id = aws_access_key_id
         self._aws_secret_access_key = aws_secret_access_key
         self._region_name = region_name
