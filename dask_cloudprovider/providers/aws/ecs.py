@@ -423,6 +423,11 @@ class Worker(Task):
             "memoryReservation": self._mem,
         }
         self._worker_type = worker_type
+        logger.info(
+            "Worker constructor: self._gpu={}] self._overrides={}".format(
+                self._gpu, self._overrides
+            )
+        )
 
 
 class ECSCluster(SpecCluster):
@@ -507,6 +512,7 @@ class ECSCluster(SpecCluster):
             <worker_type>_worker_extra_args
             <worker_type>_n_workers
             <worker_type>_capacity_provider_strategy
+            <worker_type>_image
 
         Example kwargs:
             additional_worker_types=['highmem', 'gpu'],
@@ -517,6 +523,7 @@ class ECSCluster(SpecCluster):
             gpu_worker_gpu=4,
             highmem_worker_extra_args=["--resources", "GPU=4"],
             gpu_n_workers=2,
+            gpu_image="rapidsai/rapidsai:latest",
 
         A common pattern with this option is to specify different Dask worker resources (as documented here:
         https://distributed.dask.org/en/latest/resources.html) for the different worker types so that tasks
@@ -783,6 +790,12 @@ class ECSCluster(SpecCluster):
                     "_{}_capacity_provider_strategy".format(worker_type),
                     kwargs.pop("{}_capacity_provider_strategy".format(worker_type)),
                 )
+            if "{}_image".format(worker_type) in kwargs:
+                setattr(
+                    self,
+                    "_{}_image".format(worker_type),
+                    kwargs.pop("{}_image".format(worker_type)),
+                )
         super().__init__(**kwargs)
 
     def _client(self, name: str):
@@ -973,8 +986,16 @@ class ECSCluster(SpecCluster):
         logger.info("self.worker_spec.keys(): {}".format(self.worker_spec.keys()))
 
         for worker_type in self._additional_worker_types or []:
+            worker_type_task_definition_arn = await self._create_worker_task_definition_arn(
+                worker_type=worker_type
+            )
+            logger.info(
+                "worker_type_task_definition_arn: {}".format(
+                    worker_type_task_definition_arn
+                )
+            )
             worker_type_options = {
-                "task_definition_arn": self.worker_task_definition_arn,
+                "task_definition_arn": worker_type_task_definition_arn,
                 "fargate": self._fargate_workers,
                 "cpu": getattr(
                     self, "_{}_worker_cpu".format(worker_type), self._worker_cpu
@@ -997,7 +1018,7 @@ class ECSCluster(SpecCluster):
                 ),
                 **options,
             }
-            logger.info("worker_type_options[{}]={}".format(worker_type, worker_type_options))
+            # logger.info("worker_type_options[{}]={}".format(worker_type, worker_type_options))
 
             type_n_workers = getattr(self, "_{}_n_workers".format(worker_type), 1)
             logger.info("type_n_workers: {}".format(type_n_workers))
@@ -1231,7 +1252,9 @@ class ECSCluster(SpecCluster):
     async def _create_scheduler_task_definition_arn(self):
         async with self._client("ecs") as ecs:
             response = await ecs.register_task_definition(
-                family="{}-{}".format(self._task_family_name_prefix or self.cluster_name, "scheduler"),
+                family="{}-{}".format(
+                    self._task_family_name_prefix or self.cluster_name, "scheduler"
+                ),
                 taskRoleArn=self._task_role_arn,
                 executionRoleArn=self._execution_role_arn,
                 networkMode="awsvpc",
@@ -1284,11 +1307,16 @@ class ECSCluster(SpecCluster):
                 taskDefinition=self.scheduler_task_definition_arn
             )
 
-    async def _create_worker_task_definition_arn(self):
+    async def _create_worker_task_definition_arn(self, worker_type=None):
         resource_requirements = []
-        if self._worker_gpu:
+        worker_gpu = (
+            self._worker_gpu
+            if not worker_type
+            else getattr(self, "_{}_worker_gpu".format(worker_type), self._worker_gpu)
+        )
+        if worker_gpu:
             resource_requirements.append(
-                {"type": "GPU", "value": str(self._worker_gpu)}
+                {"type": "GPU", "value": str(worker_gpu)}
             )
             logger.info(
                 "_create_worker_task_definition_arn: resource_requirements = {}".format(
@@ -1296,22 +1324,29 @@ class ECSCluster(SpecCluster):
                 )
             )
         async with self._client("ecs") as ecs:
+            family = "{}-{}".format(
+                self._task_family_name_prefix or self.cluster_name, "worker"
+            )
+            if worker_type:
+                family += "-{}".format(worker_type)
             response = await ecs.register_task_definition(
-                family="{}-{}".format(self._task_family_name_prefix or self.cluster_name, "worker"),
+                family=family,
                 taskRoleArn=self._task_role_arn,
                 executionRoleArn=self._execution_role_arn,
                 networkMode="awsvpc",
                 containerDefinitions=[
                     {
                         "name": "dask-worker",
-                        "image": self.image,
+                        "image": self.image
+                        if not worker_type
+                        else getattr(self, "_{}_image", self.image),
                         "cpu": self._worker_cpu,
                         "memory": self._worker_mem,
                         "memoryReservation": self._worker_mem,
                         "resourceRequirements": resource_requirements,
                         "essential": True,
                         "command": [
-                            "dask-cuda-worker" if self._worker_gpu else "dask-worker",
+                            "dask-cuda-worker" if worker_gpu else "dask-worker",
                             "--nthreads",
                             "{}".format(max(int(self._worker_cpu / 1024), 1)),
                             "--memory-limit",
