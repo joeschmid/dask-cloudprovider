@@ -1339,7 +1339,7 @@ class ECSCluster(SpecCluster):
                         "name": "dask-worker",
                         "image": self.image
                         if not worker_type
-                        else getattr(self, "_{}_image", self.image),
+                        else getattr(self, "_{}_image".format(worker_type), self.image),
                         "cpu": self._worker_cpu,
                         "memory": self._worker_mem,
                         "memoryReservation": self._worker_mem,
