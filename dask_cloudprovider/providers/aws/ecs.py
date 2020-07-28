@@ -532,6 +532,11 @@ class ECSCluster(SpecCluster):
         ``None``.
 
         Defaults to ``'dask-{uuid}'``
+    task_family_name_prefix: str (optional)
+        A string to use as the ECS task family name, e.g. if task_family_name_prefix="joe" then
+        the family names would be "joe-scheduler" and "joe-worker"
+
+        Defaults to ``None``.
     execution_role_arn: str (optional)
         The ARN of an existing IAM role to use for ECS execution.
 
@@ -667,6 +672,7 @@ class ECSCluster(SpecCluster):
         additional_worker_types=None,
         cluster_arn=None,
         cluster_name_template=None,
+        task_family_name_prefix=None,
         execution_role_arn=None,
         task_role_arn=None,
         task_role_policies=None,
@@ -710,6 +716,7 @@ class ECSCluster(SpecCluster):
         self.cluster_arn = cluster_arn
         self.cluster_name = None
         self._cluster_name_template = cluster_name_template
+        self._task_family_name_prefix = task_family_name_prefix
         self._execution_role_arn = execution_role_arn
         self._task_role_arn = task_role_arn
         self._task_role_policies = task_role_policies
@@ -990,7 +997,7 @@ class ECSCluster(SpecCluster):
                 ),
                 **options,
             }
-            # logger.info("worker_type_options[{}]={}".format(worker_type, worker_type_options))
+            logger.info("worker_type_options[{}]={}".format(worker_type, worker_type_options))
 
             type_n_workers = getattr(self, "_{}_n_workers".format(worker_type), 1)
             logger.info("type_n_workers: {}".format(type_n_workers))
@@ -1224,7 +1231,7 @@ class ECSCluster(SpecCluster):
     async def _create_scheduler_task_definition_arn(self):
         async with self._client("ecs") as ecs:
             response = await ecs.register_task_definition(
-                family="{}-{}".format(self.cluster_name, "scheduler"),
+                family="{}-{}".format(self._task_family_name_prefix or self.cluster_name, "scheduler"),
                 taskRoleArn=self._task_role_arn,
                 executionRoleArn=self._execution_role_arn,
                 networkMode="awsvpc",
@@ -1283,9 +1290,14 @@ class ECSCluster(SpecCluster):
             resource_requirements.append(
                 {"type": "GPU", "value": str(self._worker_gpu)}
             )
+            logger.info(
+                "_create_worker_task_definition_arn: resource_requirements = {}".format(
+                    resource_requirements
+                )
+            )
         async with self._client("ecs") as ecs:
             response = await ecs.register_task_definition(
-                family="{}-{}".format(self.cluster_name, "worker"),
+                family="{}-{}".format(self._task_family_name_prefix or self.cluster_name, "worker"),
                 taskRoleArn=self._task_role_arn,
                 executionRoleArn=self._execution_role_arn,
                 networkMode="awsvpc",
