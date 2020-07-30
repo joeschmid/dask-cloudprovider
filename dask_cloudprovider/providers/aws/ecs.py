@@ -256,7 +256,7 @@ class Task:
                     run_task_kwargs["overrides"]["cpu"] = str(self._cpu)
                 if hasattr(self, "_mem"):
                     run_task_kwargs["overrides"]["memory"] = str(self._mem)
-                # logger.info("run_task_kwargs: {}".format(run_task_kwargs))
+                logger.info("run_task_kwargs: {}".format(run_task_kwargs))
                 async with self._client("ecs") as ecs:
                     response = await ecs.run_task(**run_task_kwargs)
 
@@ -1315,9 +1315,7 @@ class ECSCluster(SpecCluster):
             else getattr(self, "_{}_worker_gpu".format(worker_type), self._worker_gpu)
         )
         if worker_gpu:
-            resource_requirements.append(
-                {"type": "GPU", "value": str(worker_gpu)}
-            )
+            resource_requirements.append({"type": "GPU", "value": str(worker_gpu)})
             logger.info(
                 "_create_worker_task_definition_arn: resource_requirements = {}".format(
                     resource_requirements
@@ -1329,6 +1327,28 @@ class ECSCluster(SpecCluster):
             )
             if worker_type:
                 family += "-{}".format(worker_type)
+            image = (
+                self.image
+                if not worker_type
+                else getattr(self, "_{}_image".format(worker_type), self.image)
+            )
+            cpu = (
+                self._worker_cpu
+                if not worker_type
+                else getattr(self, "_{}_worker_cpu".format(worker_type), self.image)
+            )
+            memory = (
+                self._worker_mem
+                if not worker_type
+                else getattr(self, "_{}_worker_mem".format(worker_type), self.image)
+            )
+            extra_args = (
+                self._worker_extra_args
+                if not worker_type
+                else getattr(
+                    self, "_{}_worker_extra_args".format(worker_type), self.image
+                )
+            )
             response = await ecs.register_task_definition(
                 family=family,
                 taskRoleArn=self._task_role_arn,
@@ -1337,28 +1357,22 @@ class ECSCluster(SpecCluster):
                 containerDefinitions=[
                     {
                         "name": "dask-worker",
-                        "image": self.image
-                        if not worker_type
-                        else getattr(self, "_{}_image".format(worker_type), self.image),
-                        "cpu": self._worker_cpu,
-                        "memory": self._worker_mem,
-                        "memoryReservation": self._worker_mem,
+                        "image": image,
+                        "cpu": cpu,
+                        "memory": memory,
+                        "memoryReservation": memory,
                         "resourceRequirements": resource_requirements,
                         "essential": True,
                         "command": [
                             "dask-cuda-worker" if worker_gpu else "dask-worker",
                             "--nthreads",
-                            "{}".format(max(int(self._worker_cpu / 1024), 1)),
+                            "{}".format(max(int(cpu / 1024), 1)),
                             "--memory-limit",
-                            "{}MB".format(int(self._worker_mem)),
+                            "{}MB".format(int(memory)),
                             "--death-timeout",
                             "60",
                         ]
-                        + (
-                            list()
-                            if not self._worker_extra_args
-                            else self._worker_extra_args
-                        ),
+                        + (list() if not extra_args else extra_args),
                         "logConfiguration": {
                             "logDriver": "awslogs",
                             "options": {
@@ -1373,8 +1387,8 @@ class ECSCluster(SpecCluster):
                 ],
                 volumes=self._volumes if self._volumes else [],
                 requiresCompatibilities=["FARGATE"] if self._fargate_workers else [],
-                cpu=str(self._worker_cpu),
-                memory=str(self._worker_mem),
+                cpu=str(cpu),
+                memory=str(memory),
                 tags=dict_to_aws(self.tags),
             )
         weakref.finalize(self, self.sync, self._delete_worker_task_definition_arn)
